@@ -74,48 +74,40 @@ def query_text(user_message):
     """Query the collection for the specified text."""
     print(f"Querying the collection for '{user_message}'...")
     n_results = 3
-
-    try:
-        query_results = collection.query(query_documents=[user_message], n_results=n_results)
-
-        # Filter relevant results using relevancy_query function
-        relevant_results = relevancy_query(query_results, user_message)
-
-        # Print the relevant results
-        if relevant_results:
-            for query_result in relevant_results:
-                print(f"Relevant result: {query_result['document']}")
-        else:
-            print("No relevant results found.")
-
-    except NoDatapointsException:
-        print("No results found.")
-        relevant_results = []
-
-    return relevant_results
-
-
-def relevancy_query(query_results, user_message):
+    max_distance = 1.5
     relevant_results = []
+    
+    while max_distance > 0.5:
+        try:
+            query_results = collection.query(query_texts=[user_message], n_results=n_results)
+            relevant_results = [doc for doc, dist in zip(query_results['documents'], query_results['distances']) if dist[0] <= max_distance]
+            if len(relevant_results) > 0:
+                break
+            max_distance -= 0.25
+        except NoDatapointsException:
+            print("No results found.")
+            return []
 
-    for query_result in query_results:
-        response = openai.ChatCompletion.create(
-            model='gpt-3.5-turbo',
-            messages=[
-                {'role': 'system', 'content': 'you determine if the result is relevant or not - respond with yes or no only.'},
-                {'role': 'user', 'content': f"are these {query_result['document']} relevant to this {user_message}?"},
-            ],
-        )
-        print(f"Response: {response.choices[0].text.strip()}")
-        relevancy_query = response.choices[0].message["content"].strip()
-        print(f"Relevancy query: {relevancy_query}")
+    # Chunk the results and query them
+    chunked_results = []
+    for result in relevant_results:
+        try:
+            chunked_query_results = collection.query(query_texts=[result[0]], n_results=n_results)
+            chunked_results.extend([doc for doc, dist in zip(chunked_query_results['documents'], chunked_query_results['distances']) if dist[0] <= max_distance])
+        except NoDatapointsException:
+            pass
 
-        if relevancy_query.lower() == "yes":
-            relevant_results.append(query_result)
-        print(f"Relevant results: {relevant_results}")
+    # Sort chunked results based on distance and take top 5
+    sorted_chunked_results = sorted(chunked_results, key=lambda x: x[1])[:5]
 
-    return relevant_results
+    # Print the relevant results
+    if sorted_chunked_results:
+        for query_result in sorted_chunked_results:
+            print(f"Relevant result: {query_result[0]}")
+    else:
+        print("No relevant results found.")
 
+    return sorted_chunked_results
 
 
 class HermesBot(discord.Client):
@@ -140,20 +132,18 @@ class HermesBot(discord.Client):
         user_message = user_message.replace(f'<@!{self.user.id}>', '').strip()
 
         # Query the collection using the provided user_message
-        results = collection.query(
-            query_texts=[user_message],
-            n_results=3,
-        )
+        results = query_text(user_message)
         print(f"Query results: {results}")
-        if not results or not results['documents']:
+        if not results:
             hermes_input = user_message
         else:
             # Flatten the list of lists and remove duplicates
-            document_texts = list(set([doc[0] for doc in results['documents']]))
+            document_texts = list(set([doc[0] for doc in results]))
             hermes_input = user_message + "\n\n" + "\n\n".join(document_texts)
 
         async with message.channel.typing():
-            response = hermes_response(hermes_input)
+            await asyncio.sleep(15)
+        response = hermes_response(hermes_input)
 
         # Reply to the user who mentioned Hermes
         await message.reply(response)
@@ -252,7 +242,7 @@ while True:
                 print(collection)
             name = input("Enter the name of the collection to load: ")
             try:
-                collection = chroma_client.get_or_create_collection(name=name)
+                collection = chroma_client.load_collection(name=name)
                 print(f"Collection {name} loaded.")
                 print(f"There are {collection.name.count(name)} documents in the collection")
                 collection_menu(collection)
